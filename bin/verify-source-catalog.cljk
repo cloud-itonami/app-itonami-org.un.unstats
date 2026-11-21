@@ -1,0 +1,97 @@
+#!/usr/bin/env nbb
+(ns verify-source-catalog
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]))
+(def fs (js/require "fs"))
+(def path-mod (js/require "path"))
+(def crypto (js/require "crypto"))
+(defn fail [msg]
+  (binding [*print-fn* *print-err-fn*]
+    (println "FAIL:" msg))
+  (throw (js/Error. msg)))
+(def catalog
+  (reader/read-string
+   (.toString (.readFileSync fs "raw/source-catalog.edn"))))
+(def source-rows (vec (:sources catalog)))
+(def series-rows (vec (:series catalog)))
+(def hash-rows (filterv #(and (:path %) (:sha256 %))
+                        (into source-rows series-rows)))
+;; 1. Every row naming :path with :sha256 must match the file on disk.
+(doseq [{:keys [path sha256 bytes]} hash-rows]
+  (when-not (.existsSync fs path)
+    (fail (str "missing file " path)))
+  (let [buf (.readFileSync fs path)
+        actual (-> (.createHash crypto "sha256") (.update buf) (.digest "hex"))]
+    (when-not (= actual sha256)
+      (fail (str "sha256 mismatch for " path
+                 " catalog=" sha256 " actual=" actual))))
+  (when (some? bytes)
+    (let [actual-bytes (.-length (.readFileSync fs path))]
+      (when-not (= actual-bytes bytes)
+        (fail (str "bytes mismatch for " path
+                   " catalog=" bytes " actual=" actual-bytes))))))
+;; 2. Every file under raw/sdg-series/ must be named by a :series row.
+(def series-dir "raw/sdg-series")
+(def listed-paths (set (keep :path series-rows)))
+(def actual-files
+  (if (.existsSync fs series-dir)
+    (->> (.readdirSync fs series-dir)
+         (mapv #(.join path-mod series-dir %))
+         (filterv #(.endsWith % ".json")))
+    (fail (str "missing directory " series-dir))))
+(doseq [f (sort actual-files)]
+  (when-not (contains? listed-paths f)
+    (fail (str "unlisted file under raw/sdg-series/: " f))))
+(when (empty? actual-files)
+  (fail "no files under raw/sdg-series/"))
+;; 3. For :series rows, the record count across pages must equal the
+;;    response's own total.
+(doseq [[series-code pages] (group-by :series series-rows)]
+  (let [parsed (mapv (fn [{:keys [path page-number total-pages total-elements]}]
+                       (let [doc (js/JSON.parse
+                                  (.toString (.readFileSync fs path)))
+                         recs (.-length (.-data doc))]
+                         {:path path
+                          :row-page page-number
+                          :row-total-pages total-pages
+                          :row-total total-elements
+                          :doc-page (.-pageNumber doc)
+                          :doc-total-pages (.-totalPages doc)
+                          :doc-total (.-totalElements doc)
+                          :records recs}))
+                     pages)
+        totals (set (map :doc-total parsed))]
+    (when-not (= 1 (count totals))
+      (fail (str "series " series-code
+                 " pages disagree on totalElements: "
+                 (str/join "," totals))))
+    (let [total (first totals)]
+      (doseq [{:keys [path row-page row-total doc-page doc-total
+                      doc-total-pages row-total-pages]} parsed]
+        (when-not (= doc-page row-page)
+          (fail (str path " pageNumber " doc-page
+                     " differs from catalog :page-number " row-page)))
+        (when-not (= doc-total row-total)
+          (fail (str path " totalElements " doc-total
+                     " differs from catalog :total-elements " row-total)))
+        (when-not (= doc-total-pages row-total-pages)
+          (fail (str path " totalPages " doc-total-pages
+                     " differs from catalog :total-pages " row-total-pages))))
+      (doseq [{:keys [path doc-page doc-total-pages]} parsed]
+        (when-not (and (integer? doc-page)
+                       (<= 1 doc-page doc-total-pages))
+          (fail (str path " pageNumber out of range"))))
+      (let [have (set (map :doc-page parsed))
+            want (set (range 1 (inc (:doc-total-pages (first parsed)))))]
+        (when-not (= have want)
+          (fail (str "series " series-code " pages present " (sort have)
+                     " expected " (sort want)))))
+      (let [records (reduce + 0 (map :records parsed))]
+        (when-not (= records total)
+          (fail (str "series " series-code " records across pages "
+                     records " differs from totalElements " total)))))))
+(let [total-bytes (reduce + 0 (map #(.-size (.statSync fs (:path %))) hash-rows))]
+  (println (str "source rows: " (count source-rows)
+                ", series rows: " (count series-rows)
+                ", files checked: " (count hash-rows)
+                ", total bytes: " total-bytes)))
