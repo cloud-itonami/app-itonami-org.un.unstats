@@ -22,3 +22,9 @@
 * `derived/2026-11-21/m49-iso3.edn`: `kbb bin/build-m49-crosswalk.cljk <input-html> <output-edn> <retrieved-at>` で新ページから再生成（引数なしの既定動作は従来どおり `derived/m49-iso3.edn` を再現します）。248件で、旧 crosswalk との差分は `520` の国名のみです。手編集はしていません。
 * `derived/2026-11-21/DIFF.edn`: 旧 set と新 set の測定差分（crosswalk の件数・新旧いずれかのみに存在する M49 code・ISO3 差分・国名差分、系列ごとの新旧件数と値が異なる area code 数）。
 * 検証: `nbb bin/verify-source-catalog.cljk` は `:snapshots` 行の sha256・バイト数、dated directory 配下の未登録 file の有無、snapshot page の `pageNumber` / `totalElements` / 件数も確認します。
+
+## M49 crosswalk pin（AWAI-3805）
+
+`derived/m49-iso3.edn`（取得日 2026-07-10、248件、単一行）の件数と、dated copy `derived/2026-11-21/m49-iso3.edn`（取得日 2026-11-21、248件）との M49 code 集合・ISO3 対応の一致を `nbb bin/verify-m49-crosswalk-pin.cljk` で固定します（file 読みのみ、network なし）。M49 改訂で mapping が変わるとこの検証が落ちるのが仕様で、crosswalk の更新は既存 file の上書きではなく新しい dated set の追加で行います。byte 比較は参考表示です（最低でも `:retrieved-at` が異なるため一致しない）。国名差分（`520` Nauru → Naoero）は `derived/2026-11-21/DIFF.edn` に記録済みで、この検証は落としません。出どころはどちらも `https://unstats.un.org/unsd/methodology/m49/overview/`（取得日は各 file の `:crosswalk/retrieved-at` を正とします）。
+
+この repo で作った部分（`bin/verify-m49-crosswalk-pin.cljk`）の license は権利者の決定待ち。`raw/`・`derived/` の原典 data は各出典の条件のまま。
