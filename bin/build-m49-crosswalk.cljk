@@ -23,7 +23,14 @@
                (re-matches #"[A-Z]{3}" (or iso3 "")))
       {:geo/m49 m49 :country/iso3 iso3 :country/name name})))
 
-(let [html (slurp* "raw/m49/overview-en.html")
+;; Optional CLI args: [input-html output-edn retrieved-at].
+;; Defaults reproduce the original 2026-07-10 snapshot build byte-for-byte.
+(def cli-args (vec *command-line-args*))
+(def in-path (get cli-args 0 "raw/m49/overview-en.html"))
+(def out-path (get cli-args 1 "derived/m49-iso3.edn"))
+(def retrieved-at (get cli-args 2 "2026-07-10"))
+
+(let [html (slurp* in-path)
       ;; The page contains translated copies.  The first full table is English.
       first-table (second (re-find #"(?is)<table[^>]*>(.*?)</table>" html))
       entries (->> (re-seq #"(?is)<tr[^>]*>.*?</tr>" first-table)
@@ -33,11 +40,11 @@
                    vec)]
   (when (< (count entries) 200)
     (throw (js/Error. (str "Expected at least 200 M49/ISO3 entries, got " (count entries)))))
-  (.mkdirSync fs "derived" #js {:recursive true})
-  (.writeFileSync fs "derived/m49-iso3.edn"
+  (.mkdirSync fs (.dirname (js/require "path") out-path) #js {:recursive true})
+  (.writeFileSync fs out-path
                   (str (pr-str {:crosswalk/id :un-m49-to-iso3
                                 :crosswalk/source :source/un-m49-overview
                                 :crosswalk/source-url "https://unstats.un.org/unsd/methodology/m49/overview/"
-                                :crosswalk/retrieved-at "2026-07-10"
+                                :crosswalk/retrieved-at retrieved-at
                                 :crosswalk/entries entries}) "\n"))
   (println (str "built " (count entries) " official M49-to-ISO3 entries")))

@@ -14,8 +14,9 @@
    (.toString (.readFileSync fs "raw/source-catalog.edn"))))
 (def source-rows (vec (:sources catalog)))
 (def series-rows (vec (:series catalog)))
+(def snapshot-rows (vec (:snapshots catalog)))
 (def hash-rows (filterv #(and (:path %) (:sha256 %))
-                        (into source-rows series-rows)))
+                        (into (into source-rows series-rows) snapshot-rows)))
 ;; 1. Every row naming :path with :sha256 must match the file on disk.
 (doseq [{:keys [path sha256 bytes]} hash-rows]
   (when-not (.existsSync fs path)
@@ -44,9 +45,34 @@
     (fail (str "unlisted file under raw/sdg-series/: " f))))
 (when (empty? actual-files)
   (fail "no files under raw/sdg-series/"))
+;; 2b. Every file under a dated snapshot directory must be named by a
+;;     :snapshots row.
+(def snapshot-dirs ["raw/m49/2026-11-21" "raw/sdg/2026-11-21"])
+(def snapshot-paths (set (keep :path snapshot-rows)))
+(when (empty? snapshot-rows)
+  (fail "no rows under :snapshots"))
+(doseq [dir snapshot-dirs]
+  (when-not (.existsSync fs dir)
+    (fail (str "missing directory " dir)))
+  (let [files (->> (.readdirSync fs dir)
+                   (mapv #(.join path-mod dir %))
+                   (filterv #(or (.endsWith % ".json") (.endsWith % ".html"))))]
+    (when (empty? files)
+      (fail (str "no files under " dir)))
+    (doseq [f (sort files)]
+      (when-not (contains? snapshot-paths f)
+        (fail (str "unlisted file under " dir ": " f))))))
 ;; 3. For :series rows, the record count across pages must equal the
 ;;    response's own total.
-(doseq [[series-code pages] (group-by :series series-rows)]
+;; 3. For :series rows (and paged :snapshots rows), the record count across
+;;    pages must equal the response's own total. Groups are split by series
+;;    AND period so the 2022 snapshot pages never merge with the 2000:2023
+;;    time-series pages of the same series.
+(def period-of (fn [{:keys [time-period observation-year]}]
+                 (or time-period (some-> observation-year str))))
+(def paged-rows (filterv #(and (:series %) (:total-elements %))
+                         (into series-rows snapshot-rows)))
+(doseq [[[series-code period] pages] (group-by (juxt :series period-of) paged-rows)]
   (let [parsed (mapv (fn [{:keys [path page-number total-pages total-elements]}]
                        (let [doc (js/JSON.parse
                                   (.toString (.readFileSync fs path)))
@@ -84,14 +110,17 @@
       (let [have (set (map :doc-page parsed))
             want (set (range 1 (inc (:doc-total-pages (first parsed)))))]
         (when-not (= have want)
-          (fail (str "series " series-code " pages present " (sort have)
+          (fail (str "series " series-code " period " period
+                     " pages present " (sort have)
                      " expected " (sort want)))))
       (let [records (reduce + 0 (map :records parsed))]
         (when-not (= records total)
-          (fail (str "series " series-code " records across pages "
+          (fail (str "series " series-code " period " period
+                     " records across pages "
                      records " differs from totalElements " total)))))))
 (let [total-bytes (reduce + 0 (map #(.-size (.statSync fs (:path %))) hash-rows))]
   (println (str "source rows: " (count source-rows)
                 ", series rows: " (count series-rows)
+                ", snapshot rows: " (count snapshot-rows)
                 ", files checked: " (count hash-rows)
                 ", total bytes: " total-bytes)))
