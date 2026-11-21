@@ -1,5 +1,4 @@
 #!/usr/bin/env nbb
-;; SPDX-License-Identifier: Apache-2.0
 ;; AWAI-3806: verify the committed gap list of SDG aggregates without
 ;; ISO3. Recomputes the list from the raw SDG observation files plus
 ;; derived/m49-iso3.edn and fails when the committed file is stale,

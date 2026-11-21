@@ -32,3 +32,5 @@
 ## SDG gap list（AWAI-3806）
 
 `derived/m49-iso3.edn` に ISO3 対応がないまま観測に現れる SDG 地域（M49 地域集計と `412` Kosovo）を `derived/sdg-aggregates-without-iso3.edn` に列挙します（42行、各行は M49 code・名称・出現 file と件数）。自作の一覧のみで、第三者の分類文は転載しません。地域集計に ISO3 を推測で付けることはしません。`nbb bin/verify-sdg-gap-list.cljk`（file 読みのみ、network なし）が `raw/sdg/`・`raw/sdg/2026-11-21/`・`raw/sdg-series/` の30観測 file と crosswalk から再計算し、不一致・未列挙・ISO3 を得た行があると落とします。残余が空（未列挙ゼロ）であることが pass 条件です。出どころは UN SDG API v1（`raw/source-catalog.edn` の `:series`・`:snapshots` に URL と取得日を記録）。AWAI-3805（M49 pin）に mapping の安定性を依存します。
+
+この repo で作った部分（`bin/verify-sdg-gap-list.cljk`、`derived/sdg-aggregates-without-iso3.edn`）の license は権利者の決定待ち。`raw/`・`derived/` の原典 data は各出典の条件のまま。
