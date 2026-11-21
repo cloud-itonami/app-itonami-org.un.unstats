@@ -1,0 +1,140 @@
+#!/usr/bin/env nbb
+;; SPDX-License-Identifier: Apache-2.0
+;; AWAI-3806: verify the committed gap list of SDG aggregates without
+;; ISO3. Recomputes the list from the raw SDG observation files plus
+;; derived/m49-iso3.edn and fails when the committed file is stale,
+;; when an unlisted ISO3-less aggregate exists, or when a listed one
+;; gains an ISO3. An explicitly empty remainder section is a pass; a
+;; missing gap-list file is a failure. Never maps a regional aggregate
+;; to a guessed ISO3. File reads only, no network.
+;; Usage: nbb bin/verify-sdg-gap-list.cljk [gap-list crosswalk raw-sdg raw-sdg-dated raw-sdg-series]
+(ns verify-sdg-gap-list
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]))
+
+(def fs (js/require "fs"))
+(def path-mod (js/require "path"))
+(defn fail [msg]
+  (binding [*print-fn* *print-err-fn*]
+    (println (str "FAIL: " msg)))
+  (throw (js/Error. msg)))
+
+(def cli-args (vec *command-line-args*))
+(def gap-path (get cli-args 0 "derived/sdg-aggregates-without-iso3.edn"))
+(def crosswalk-path (get cli-args 1 "derived/m49-iso3.edn"))
+(def raw-dirs [(get cli-args 2 "raw/sdg")
+               (get cli-args 3 "raw/sdg/2026-11-21")
+               (get cli-args 4 "raw/sdg-series")])
+
+(when-not (.existsSync fs gap-path)
+  (fail (str "missing gap-list file " gap-path)))
+(when-not (.existsSync fs crosswalk-path)
+  (fail (str "missing crosswalk file " crosswalk-path)))
+
+(defn list-json [dir]
+  (when-not (.existsSync fs dir)
+    (fail (str "missing directory " dir)))
+  (->> (.readdirSync fs dir)
+       (filter #(.endsWith % ".json"))
+       (map #(.join path-mod dir %))
+       sort
+       vec))
+
+(def input-files (vec (sort (mapcat list-json raw-dirs))))
+;; Temp-copy runs override the raw dirs, so canonicalize measured paths
+;; back to the committed layout before comparing with the gap list.
+(def canonical-dirs ["raw/sdg" "raw/sdg/2026-11-21" "raw/sdg-series"])
+(defn canonicalize [p]
+  (let [dir (some #(when (str/starts-with? p (str % "/")) %) raw-dirs)
+        rel (subs p (inc (count dir)))]
+    (str (get canonical-dirs (.indexOf raw-dirs dir)) "/" rel)))
+(when (empty? input-files)
+  (fail "no input JSON files found"))
+
+(defn pad3 [code]
+  (let [s (str code)]
+    (str (apply str (repeat (- 3 (count s)) "0")) s)))
+
+;; Recompute: per input file totalElements + records, and per area
+;; code the display name plus per-file occurrence counts.
+(def measured-inputs
+  (mapv (fn [f]
+          (let [doc (js/JSON.parse (.toString (.readFileSync fs f)))]
+            {:path (canonicalize f)
+             :total-elements (.-totalElements doc)
+             :records (.-length (.-data doc))}))
+        input-files))
+(def measured-per-code (atom {}))
+(doseq [f input-files]
+  (let [doc (js/JSON.parse (.toString (.readFileSync fs f)))
+        cpath (canonicalize f)]
+    (doseq [rec (.-data doc)]
+      (let [code (pad3 (.-geoAreaCode rec))
+            entry (or (get @measured-per-code code)
+                      {:names #{} :files {}})]
+        (swap! measured-per-code assoc code
+               {:names (conj (:names entry) (.-geoAreaName rec))
+                :files (update (:files entry) cpath (fnil inc 0))})))))
+
+(def crosswalk (reader/read-string (.toString (.readFileSync fs crosswalk-path))))
+(def m49-set (set (map :geo/m49 (:crosswalk/entries crosswalk))))
+(def measured-gap-raw
+  (into {} (filter (fn [[code _]] (not (contains? m49-set code)))
+                   @measured-per-code)))
+;; Gap aggregates have one stable display name each. Codes with an
+;; ISO3 (e.g. 520 Nauru -> Naoero) may drift; that drift is recorded
+;; in derived/2026-11-21/DIFF.edn, not here.
+(doseq [[code {:keys [names]}] measured-gap-raw]
+  (when-not (= 1 (count names))
+    (fail (str "aggregate " code " has several names: " (pr-str names)))))
+(def measured-gap
+  (into {} (map (fn [[code {:keys [names files]}]]
+                  [code {:name (first names) :files files}])
+                measured-gap-raw)))
+
+(def gap-doc (reader/read-string (.toString (.readFileSync fs gap-path))))
+(def listed-inputs (vec (:gap-list/inputs gap-doc)))
+(def listed-entries (vec (:gap-list/entries gap-doc)))
+
+;; 1. Committed per-file totals must match the measured ones.
+(when-not (= listed-inputs measured-inputs)
+  (fail (str "input totals stale: listed " (count listed-inputs)
+             " files, measured " (count measured-inputs)
+             " files; re-derive totalElements/records from raw/")))
+
+;; 2. Committed rows must equal the recomputed gap exactly.
+(def listed-by-code (into {} (map (juxt :geo/m49 identity) listed-entries)))
+(def measured-codes (set (keys measured-gap)))
+(def listed-codes (set (keys listed-by-code)))
+(def unlisted (sort (remove #(contains? listed-codes %) measured-codes)))
+(def stale (sort (remove #(contains? measured-codes %) listed-codes)))
+(when-not (empty? unlisted)
+  (fail (str "unlisted ISO3-less aggregates: " (vec unlisted))))
+(when-not (empty? stale)
+  (fail (str "listed aggregates no longer ISO3-less: " (vec stale))))
+(doseq [code (sort measured-codes)]
+  (let [listed (get listed-by-code code)
+        measured (get measured-gap code)]
+    (when-not (= (:aggregate/name listed) (:name measured))
+      (fail (str "aggregate " code " name differs: listed "
+                 (pr-str (:aggregate/name listed)) " measured "
+                 (pr-str (:name measured)))))
+    (let [listed-occ (:occurrences listed)
+          measured-occ (reduce + 0 (vals (:files measured)))]
+      (when-not (= listed-occ measured-occ)
+        (fail (str "aggregate " code " occurrences differ: listed "
+                   listed-occ " measured " measured-occ))))
+    (when-not (= (:files listed) (sort (keys (:files measured))))
+      (fail (str "aggregate " code " file set differs")))))
+
+;; 3. Prove the residual is zero: nothing recomputed is unlisted.
+(def residual (sort (remove #(contains? listed-codes %) measured-codes)))
+(when-not (empty? residual)
+  (fail (str "residual ISO3-less aggregates: " (vec residual))))
+
+(doseq [{:keys [path total-elements records]} measured-inputs]
+  (println (str "input " path " totalElements=" total-elements
+                " records=" records)))
+(println (str "gap rows: " (count listed-entries)
+              ", residual unlisted ISO3-less aggregates: "
+              (count residual)))

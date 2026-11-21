@@ -28,3 +28,7 @@
 `derived/m49-iso3.edn`（取得日 2026-07-10、248件、単一行）の件数と、dated copy `derived/2026-11-21/m49-iso3.edn`（取得日 2026-11-21、248件）との M49 code 集合・ISO3 対応の一致を `nbb bin/verify-m49-crosswalk-pin.cljk` で固定します（file 読みのみ、network なし）。M49 改訂で mapping が変わるとこの検証が落ちるのが仕様で、crosswalk の更新は既存 file の上書きではなく新しい dated set の追加で行います。byte 比較は参考表示です（最低でも `:retrieved-at` が異なるため一致しない）。国名差分（`520` Nauru → Naoero）は `derived/2026-11-21/DIFF.edn` に記録済みで、この検証は落としません。出どころはどちらも `https://unstats.un.org/unsd/methodology/m49/overview/`（取得日は各 file の `:crosswalk/retrieved-at` を正とします）。
 
 この repo で作った部分（`bin/verify-m49-crosswalk-pin.cljk`）の license は権利者の決定待ち。`raw/`・`derived/` の原典 data は各出典の条件のまま。
+
+## SDG gap list（AWAI-3806）
+
+`derived/m49-iso3.edn` に ISO3 対応がないまま観測に現れる SDG 地域（M49 地域集計と `412` Kosovo）を `derived/sdg-aggregates-without-iso3.edn` に列挙します（42行、各行は M49 code・名称・出現 file と件数）。自作の一覧のみで、第三者の分類文は転載しません。地域集計に ISO3 を推測で付けることはしません。`nbb bin/verify-sdg-gap-list.cljk`（file 読みのみ、network なし）が `raw/sdg/`・`raw/sdg/2026-11-21/`・`raw/sdg-series/` の30観測 file と crosswalk から再計算し、不一致・未列挙・ISO3 を得た行があると落とします。残余が空（未列挙ゼロ）であることが pass 条件です。出どころは UN SDG API v1（`raw/source-catalog.edn` の `:series`・`:snapshots` に URL と取得日を記録）。AWAI-3805（M49 pin）に mapping の安定性を依存します。
