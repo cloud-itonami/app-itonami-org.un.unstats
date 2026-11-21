@@ -1,5 +1,4 @@
 #!/usr/bin/env nbb
-;; SPDX-License-Identifier: Apache-2.0
 ;; AWAI-3805: pin the committed M49-to-ISO3 crosswalk.
 ;; Fails when the entry count drifts (e.g. an M49 revision silently
 ;; changes the mapping), when the M49/ISO3 code relation against the
