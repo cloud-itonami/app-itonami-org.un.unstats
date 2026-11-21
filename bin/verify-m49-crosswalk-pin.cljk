@@ -1,0 +1,103 @@
+#!/usr/bin/env nbb
+;; SPDX-License-Identifier: Apache-2.0
+;; AWAI-3805: pin the committed M49-to-ISO3 crosswalk.
+;; Fails when the entry count drifts (e.g. an M49 revision silently
+;; changes the mapping), when the M49/ISO3 code relation against the
+;; dated 2026-11-21 copy drifts, or when the file layout drifts from
+;; the measured single-line shape. Informational only: the country
+;; display names (520 Nauru -> Naoero) and the :retrieved-at stamp,
+;; which are recorded in derived/2026-11-21/DIFF.edn.
+;; Usage: nbb bin/verify-m49-crosswalk-pin.cljk [crosswalk expected-count dated-copy]
+(ns verify-m49-crosswalk-pin
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]))
+
+(def fs (js/require "fs"))
+(defn fail [msg]
+  (binding [*print-fn* *print-err-fn*]
+    (println (str "FAIL: " msg)))
+  (throw (js/Error. msg)))
+
+(def cli-args (vec *command-line-args*))
+(def crosswalk-path (get cli-args 0 "derived/m49-iso3.edn"))
+(def expected-count (js/parseInt (get cli-args 1 "248") 10))
+(def dated-path (get cli-args 2 "derived/2026-11-21/m49-iso3.edn"))
+
+(when-not (.existsSync fs crosswalk-path)
+  (fail (str "missing crosswalk file " crosswalk-path)))
+(when-not (.existsSync fs dated-path)
+  (fail (str "missing dated copy " dated-path)))
+
+(def raw-text (.toString (.readFileSync fs crosswalk-path)))
+(def doc (reader/read-string raw-text))
+(def entries (vec (:crosswalk/entries doc)))
+
+;; 1. Entry count pin. The file is a single line, so grep -c would
+;;    return 1; count :geo/m49 occurrences instead.
+(def occurrences (count (re-seq #":geo/m49" raw-text)))
+(when-not (= occurrences (count entries))
+  (fail (str crosswalk-path " :geo/m49 occurrences " occurrences
+             " disagree with parsed entries " (count entries))))
+(when-not (= (count entries) expected-count)
+  (fail (str crosswalk-path " entries " (count entries)
+             " differ from pinned count " expected-count)))
+
+;; 2. Entries are well-formed and distinct.
+(def m49s (mapv :geo/m49 entries))
+(doseq [e entries]
+  (when-not (re-matches #"[0-9]{3}" (str (:geo/m49 e)))
+    (fail (str crosswalk-path " bad :geo/m49 " (pr-str e))))
+  (when-not (re-matches #"[A-Z]{3}" (str (:country/iso3 e)))
+    (fail (str crosswalk-path " bad :country/iso3 " (pr-str e)))))
+(when-not (= (count m49s) (count (distinct m49s)))
+  (fail (str crosswalk-path " duplicate :geo/m49 codes")))
+
+;; 3. Dated-copy relation pin: same entry count, same M49 code set,
+;;    same ISO3 per code. Display names may differ (recorded drift).
+(def dated-doc (reader/read-string (.toString (.readFileSync fs dated-path))))
+(def dated-entries (vec (:crosswalk/entries dated-doc)))
+(when-not (= (count dated-entries) expected-count)
+  (fail (str dated-path " entries " (count dated-entries)
+             " differ from pinned count " expected-count)))
+(def live-by-m49 (into {} (map (juxt :geo/m49 :country/iso3) entries)))
+(def dated-by-m49 (into {} (map (juxt :geo/m49 :country/iso3) dated-entries)))
+(def only-in-live (sort (remove #(contains? dated-by-m49 %) (keys live-by-m49))))
+(def only-in-dated (sort (remove #(contains? live-by-m49 %) (keys dated-by-m49))))
+(when-not (and (empty? only-in-live) (empty? only-in-dated))
+  (fail (str "M49 code sets differ: only in " crosswalk-path " " (vec only-in-live)
+             ", only in " dated-path " " (vec only-in-dated))))
+(def iso3-differ (sort (filter #(not= (get live-by-m49 %) (get dated-by-m49 %))
+                               (keys live-by-m49))))
+(when-not (empty? iso3-differ)
+  (fail (str "ISO3 differs for M49 codes " (vec iso3-differ))))
+(def live-by-name (into {} (map (juxt :geo/m49 :country/name) entries)))
+(def dated-by-name (into {} (map (juxt :geo/m49 :country/name) dated-entries)))
+(def name-differ (sort (filter #(not= (get live-by-name %) (get dated-by-name %))
+                               (keys live-by-name))))
+
+;; 4. Byte-level report (informational: retrieved-at stamp and the
+;;    recorded 520 rename differ, so the files are not byte-identical).
+(def live-buf (.readFileSync fs crosswalk-path))
+(def dated-buf (.readFileSync fs dated-path))
+(def byte-report
+  (if (.equals live-buf dated-buf)
+    "byte-identical"
+    (let [n (min (.-length live-buf) (.-length dated-buf))
+          idx (loop [i 0]
+                (if (or (>= i n) (not= (.readUInt8 live-buf i) (.readUInt8 dated-buf i)))
+                  i
+                  (recur (inc i))))]
+      (str "differ at byte " idx
+           " (expected: :retrieved-at stamp and recorded renames)"))))
+(def line-count (count (re-seq #"\n" raw-text)))
+
+(println (str "entries: " (count entries)
+              ", :geo/m49 occurrences: " occurrences
+              ", bytes: " (.-length live-buf)
+              ", newlines: " line-count
+              ", dated bytes: " (.-length dated-buf)
+              ", dated comparison: " byte-report
+              ", name-differ: " (pr-str (mapv (fn [m] {:geo/m49 m
+                                                       :live-name (get live-by-name m)
+                                                       :dated-name (get dated-by-name m)})
+                                              name-differ))))
